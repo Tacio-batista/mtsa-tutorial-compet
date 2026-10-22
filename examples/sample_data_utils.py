@@ -33,7 +33,6 @@ def get_tabular_sample_data():
         if features is None:
             features = slice(None)
 
-        # CORRIGIDO: todo intervalo é (início, início + duração), então nunca fica menor nem vazio.
         for start in starts:
             x[start:start + length, features] += anomaly
             y[start:start + length] = 1

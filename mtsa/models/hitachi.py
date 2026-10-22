@@ -30,8 +30,6 @@ class Hitachi(nn.Module):
 
 
 class WindowedHitachi(nn.Module):
-    """Hitachi on time-series windows: flattens each window (W x D) into W*D values and
-    reshapes the reconstruction back to the window shape. The Hitachi model itself is unchanged."""
 
     def __init__(self, window_size, n_features):
         super().__init__()
@@ -44,7 +42,6 @@ class WindowedHitachi(nn.Module):
 
 
 class ReconstructionError(nn.Module):
-    """Anomaly score of a window: mean squared error between the window and its reconstruction."""
 
     def __init__(self, model):
         super().__init__()
