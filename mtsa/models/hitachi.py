@@ -27,3 +27,29 @@ class Hitachi(nn.Module):
         X_encoded = self.encoder(X)
         X_decoded = self.decoder(X_encoded)
         return X_decoded
+
+
+class WindowedHitachi(nn.Module):
+    """Hitachi on time-series windows: flattens each window (W x D) into W*D values and
+    reshapes the reconstruction back to the window shape. The Hitachi model itself is unchanged."""
+
+    def __init__(self, window_size, n_features):
+        super().__init__()
+        self.autoencoder = Hitachi(input_dim=window_size * n_features)
+
+    def forward(self, X):
+        shape = X.shape
+        X_flat = X.float().reshape(shape[0], -1)
+        return self.autoencoder(X_flat).reshape(shape)
+
+
+class ReconstructionError(nn.Module):
+    """Anomaly score of a window: mean squared error between the window and its reconstruction."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, X):
+        X = X.float()
+        return torch.mean((X - self.model(X)) ** 2)

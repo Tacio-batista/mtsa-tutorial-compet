@@ -1,4 +1,4 @@
-"""Ferramentas do Desafio 1: diagnóstico do erro e comparação dos cenários A, B, C e D com o GANF.
+"""Ferramentas do Desafio 1: diagnóstico do erro e comparação dos cenários A, B, C e D (GANF e Hitachi).
 
 - sample_data_utils_original.py -> código ORIGINAL da aula, intacto
 - sample_data_utils.py          -> código CORRIGIDO
@@ -13,15 +13,19 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, roc_curve
+from sklearn.preprocessing import StandardScaler
 
 from examples import sample_data_utils as corrigida
 from examples import sample_data_utils_original as original
 from mtsa.losses.forward_loss import ForwardLoss
 from mtsa.losses.lagrange_loss import LagrangeLoss
+from mtsa.losses.mse_loss import MSELoss
 from mtsa.losses.trace_exponential_matrix_loss import TraceExponentialMatrixLoss
+from mtsa.models.hitachi import ReconstructionError, WindowedHitachi
 from mtsa.models.hybrid.ganf import GANF
 from mtsa.predictors.standard_predictor import StandardPredictor
 from mtsa.trainers.lagrange_trainer import LagrangeTrainer
+from mtsa.trainers.unsupervised_trainer import UnsupervisedTrainer
 from mtsa.utils.data import get_dataloader
 from mtsa.utils.plots import plot_roc_pr_curves
 
@@ -134,6 +138,22 @@ def treinar_e_avaliar_ganf(X_train, y_train, X_test, y_test, seed=0, epochs=2, i
     return np.ravel(y), np.ravel(y_hat)
 
 
+def treinar_e_avaliar_hitachi(X_train, y_train, X_test, y_test, seed=0, epochs=30):
+    """Treina o Hitachi como na seção do notebook e devolve (y, y_hat): gabarito e nota de cada ponto do teste."""
+    torch.manual_seed(seed)
+    scaler = StandardScaler().fit(X_train)            # média e desvio do TREINO
+    X_train = scaler.transform(X_train).astype("float32")
+    X_test = scaler.transform(X_test).astype("float32")
+    model = WindowedHitachi(window_size=WINDOW, n_features=X_train.shape[1])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    UnsupervisedTrainer().fit(model=model, optimizer=optimizer, loss=MSELoss(),
+                              train_loader=_loader(X_train, y_train), epochs=epochs)
+    model.eval()
+    y_hat, y = StandardPredictor().predict(function=ReconstructionError(model), dataloader=_loader(X_test, y_test),
+                                           pointwise=True, aggregation="mean", device="cpu")
+    return np.ravel(y), np.ravel(y_hat)
+
+
 # ============================================================================
 # 3) Cenários A, B, C e D
 # ============================================================================
@@ -184,8 +204,8 @@ def dados(versao, k=None):
     return carregar(versao) if k is None else _dados_com_k(versao, k)
 
 
-def rodar_cenarios_ganf(k=2, seed=0, graficos_individuais=True):
-    """Treina o GANF nos 4 cenários e devolve os resultados de cada um."""
+def rodar_cenarios(treinar_e_avaliar, modelo, k=2, seed=0, graficos_individuais=True):
+    """Treina o modelo nos 4 cenários e devolve os resultados de cada um."""
     cenarios = {
         "A: original + anomalias originais": ("original", None),
         "B: corrigida + anomalias originais": ("corrigida", None),
@@ -194,17 +214,35 @@ def rodar_cenarios_ganf(k=2, seed=0, graficos_individuais=True):
     }
     resultados = {}
     for nome, (versao, k_cenario) in cenarios.items():
-        print(f"\n>>> {nome}")
+        print(f"\n>>> {modelo} | {nome}")
         X_train, y_train, X_test, y_test = dados(versao, k_cenario)
-        y, y_hat = treinar_e_avaliar_ganf(X_train, y_train, X_test, y_test, seed=seed)
+        y, y_hat = treinar_e_avaliar(X_train, y_train, X_test, y_test, seed=seed)
         resultados[nome] = {
             "versao": versao, "k": k_cenario, "y": y, "y_hat": y_hat,
             "auc": roc_auc_score(y, y_hat), "ap": average_precision_score(y, y_hat),
             "prevalencia": float(np.mean(y)),
         }
         if graficos_individuais:
-            plot_roc_pr_curves(y, y_hat, title=f"GANF | {nome}")
+            plot_roc_pr_curves(y, y_hat, title=f"{modelo} | {nome}")
     return resultados
+
+
+def rodar_cenarios_ganf(k=2, seed=0, graficos_individuais=True):
+    return rodar_cenarios(treinar_e_avaliar_ganf, "GANF", k=k, seed=seed, graficos_individuais=graficos_individuais)
+
+
+def rodar_cenarios_hitachi(k=2, seed=0, graficos_individuais=True):
+    return rodar_cenarios(treinar_e_avaliar_hitachi, "Hitachi", k=k, seed=seed,
+                          graficos_individuais=graficos_individuais)
+
+
+def comparar_modelos(resultados_por_modelo):
+    """Tabela com os 4 cenários nas linhas e AUC/AP de cada modelo nas colunas."""
+    linhas = []
+    for modelo, resultados in resultados_por_modelo.items():
+        for nome, r in resultados.items():
+            linhas.append({"cenário": nome, "modelo": modelo, "AUC-ROC": round(r["auc"], 4), "AP": round(r["ap"], 4)})
+    return pd.DataFrame(linhas).pivot(index="cenário", columns="modelo", values=["AUC-ROC", "AP"])
 
 
 def tabela_resultados(resultados):
@@ -222,7 +260,7 @@ def _estilo(r):
     return cor, traco
 
 
-def graficos_comparativos(resultados):
+def graficos_comparativos(resultados, modelo=None):
     """As 4 curvas ROC juntas, as 4 PR juntas e as barras de AUC e AP lado a lado."""
     fig, axes = plt.subplots(1, 3, figsize=(19, 6))
 
@@ -260,13 +298,14 @@ def graficos_comparativos(resultados):
     for ax in axes:
         ax.grid(alpha=0.3)
         ax.legend(fontsize=9, loc="lower right" if ax is not axes[1] else "lower left")
-    fig.suptitle("Laranja = anomalias originais | Azul = anomalias de k desvios | "
+    prefixo = f"{modelo} | " if modelo else ""
+    fig.suptitle(prefixo + "Laranja = anomalias originais | Azul = anomalias de k desvios | "
                  "Tracejado = divisão original | Contínuo = divisão corrigida", fontsize=12)
     plt.tight_layout()
     plt.show()
 
 
-def notas_ao_longo_do_tempo(resultados):
+def notas_ao_longo_do_tempo(resultados, modelo=None):
     """Nota do modelo em cada instante do teste, com as anomalias do gabarito em vermelho."""
     fig, axes = plt.subplots(len(resultados), 1, figsize=(15, 3 * len(resultados)))
     for ax, (nome, r) in zip(np.atleast_1d(axes), resultados.items()):
@@ -274,7 +313,7 @@ def notas_ao_longo_do_tempo(resultados):
         ax.plot(nota, lw=0.8, color="tab:blue", label="nota do modelo")
         ax.fill_between(np.arange(len(nota)), nota.min(), nota.max(), where=gabarito == 1,
                         color="red", alpha=0.2, label="anomalia (gabarito)")
-        ax.set(title=nome, ylabel="nota")
+        ax.set(title=f"{modelo} | {nome}" if modelo else nome, ylabel="nota")
         ax.grid(alpha=0.3)
         ax.legend(loc="upper left", fontsize=8)
     np.atleast_1d(axes)[-1].set_xlabel("posição no teste")
